@@ -6,6 +6,7 @@ library(GGally)
 library(patchwork)
 library(tidymodels)
 library(lubridate)
+library(poissonreg)
 
 # reading in data
 bike.test <- vroom("test.csv") 
@@ -43,6 +44,9 @@ bike_workflow <- workflow() %>%
   add_model(my_mod) %>%
   fit(data = bike.train)
 
+extract_fit_engine(bike_workflow) %>%
+  tidy()
+
 ## Get Predictions for test set AND format for Kaggle
 test_preds <- predict(bike_workflow, new_data = bike.test) %>%
   bind_cols(., bike.test) %>% #Bind predictions with test data
@@ -53,3 +57,23 @@ test_preds <- predict(bike_workflow, new_data = bike.test) %>%
 # make a csv of predictions
 
 vroom_write(x=test_preds, file="./BikePreds.csv", delim=",")
+
+
+# Poisson Regression
+
+pois_mod <- poisson_reg() %>% # type of model
+  set_engine("glm") # GLM = generalized linear model
+
+bike_pois_workflow <- workflow() %>% 
+  add_recipe(my_recipe) %>%
+  add_model(pois_mod) %>%
+  fit(data = bike.train) # fit the workflow
+
+bike_predictions <- predict(bike_pois_workflow, new_data = bike.test) %>%
+  bind_cols(., bike.test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(x=bike_predictions, file="./PoissonBikePreds.csv", delim=",")
