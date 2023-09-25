@@ -114,3 +114,57 @@ bike_predictions_preg <- predict(preg_wf, new_data = bike.test) %>%
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 vroom_write(x=bike_predictions_preg, file="./PregBikePreds.csv", delim=",")
+
+# Tuning Models
+
+preg_model2 <- linear_reg(penalty = tune(),
+                          mixture = tune()) %>% # Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+# Set workflow
+preg_wf2 <- workflow() %>%
+  add_recipe(my_recipe2) %>%
+  add_model(preg_model2)
+
+# Grid of values to tune over
+tuning_grid <- grid_regular(penalty(),
+                            mixture(),
+                            levels = 10) 
+
+# Split data for CV
+folds <- vfold_cv(logTrainSet, v = 20, repeats = 1)
+
+# Run the CV
+CV_results <- preg_wf2 %>%
+  tune_grid(resamples = folds,
+            grid = tuning_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+# plot results
+collect_metrics(CV_results) %>%
+  filter(.metric == "rmse") %>%
+  ggplot(data=., aes(x = penalty, y = mean, color = factor(mixture))) +
+  geom_line()
+
+# find best tuning parameters
+
+bestTune <- CV_results %>%
+  select_best("rmse")
+
+# Finalize the workflow and fit it
+final_wf <- 
+  preg_wf2 %>%
+  finalize_workflow(bestTune) %>%
+  fit(data = logTrainSet)
+
+# Predict
+bike_preds_tuned <- final_wf %>%
+  predict(new_data = bike.test) %>%
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., bike.test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(x=bike_preds_tuned, file="./PregBikePreds2.csv", delim=",")
