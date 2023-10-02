@@ -8,6 +8,7 @@ library(tidymodels)
 library(lubridate)
 library(poissonreg)
 library(glmnet)
+library(stacks)
 
 # reading in data
 bike.test <- vroom("test.csv") 
@@ -295,3 +296,96 @@ bike_preds_forest <- final_wf3 %>%
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 vroom_write(x=bike_preds_forest, file="./BikePredsForest.csv", delim=",")
+
+
+# model stacking
+untunedModel <- control_stack_grid() # set of models
+tunedModel <- control_stack_resamples() # single model that is already done
+
+# define the model
+lin_model <- linear_reg() %>% 
+  set_engine("lm")
+
+# set up the whole workflow
+linreg_wf <- workflow() %>%
+  add_recipe(my_recipe3) %>%
+  add_model(lin_model)
+
+# fit linear regression to folds
+linreg_folds_fit <- linreg_wf %>%
+  fit_resamples(resamples = folds,
+                metric_set(rmse),
+                control = tunedModel)
+
+# penalized regression
+# define the model
+pen_reg_model <- linear_reg(mixture = tune(),
+                            penalty = tune()) %>%
+  set_engine("glmnet")
+
+# define the workflow
+
+pen_reg_wf <- workflow() %>%
+  add_recipe(my_recipe3) %>%
+  add_model(pen_reg_model)
+
+# define a regular grid
+
+penReg_tuneGrid <- grid_regular(mixture(),
+                                penalty(),
+                                levels = 5)
+
+# fit to Folds
+penReg_folds_fit <- pen_reg_wf %>%
+  tune_grid(resamples = folds,
+            grid = penReg_tuneGrid,
+            metrics = metric_set(rmse),
+            control = untunedModel)
+
+# tree
+reg_tree <- decision_tree(tree_depth = tune(),
+                          cost_complexity = tune(),
+                          min_n = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+# workflow
+regTree_wf <- workflow() %>%
+  add_recipe(my_recipe3) %>%
+  add_model(reg_tree)
+
+# tuning Grid
+regTree_tuneGrid <- grid_regular(tree_depth(),
+                                 cost_complexity(),
+                                 min_n(),
+                                 levels = 5)
+
+# tune the model
+trees_folds_fit <- regTree_wf %>%
+  tune_grid(resamples = folds,
+            grid = regTree_tuneGrid,
+            metrics = metric_set(rmse),
+            control = untunedModel)
+
+# stack the models together
+
+bike_stack <- stacks() %>%
+  add_candidates(linreg_folds_fit) %>%
+  add_candidates(penReg_folds_fit) %>%
+  add_candidates(trees_folds_fit)
+
+as_tibble(bike_stack)
+
+fitted_bike_stack <- bike_stack %>%
+  blend_predictions() %>%
+  fit_members()
+
+
+bike_preds_stack <- predict(fitted_bike_stack,new_data = bike.test) %>%
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., bike.test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(x=bike_preds_stack, file="./BikePredsStack.csv", delim=",")
